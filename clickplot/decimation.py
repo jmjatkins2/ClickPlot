@@ -38,45 +38,55 @@ def _visible_index_range(t_sec: np.ndarray, x0: float, x1: float, margin_frac: f
     return i0, i1
 
 
-def _bucket_min_max(t_slice: np.ndarray, v_slice: np.ndarray, x0: float, x1: float, n_columns: int):
+def _bucket_ids_for(t_slice: np.ndarray, x0: float, x1: float, n_columns: int) -> np.ndarray:
     n_columns = max(int(n_columns), 1)
     span = x1 - x0 if x1 > x0 else 1.0
     bucket_w = span / n_columns
-    bucket_ids = np.clip(((t_slice - x0) / bucket_w).astype(np.int64), 0, n_columns - 1)
-    # t_slice is sorted, so bucket_ids is non-decreasing: np.unique's first
-    # occurrence index is exactly the bucket's start, giving O(n) grouping
-    # that naturally skips empty buckets.
-    _, first_idx = np.unique(bucket_ids, return_index=True)
-    seg_min = np.minimum.reduceat(v_slice, first_idx)
-    seg_max = np.maximum.reduceat(v_slice, first_idx)
-    seg_t = t_slice[first_idx]
-    return seg_t, seg_min, seg_max
+    # t_slice is sorted, so the returned array is non-decreasing: np.unique's
+    # first-occurrence index is exactly each bucket's start, giving O(n)
+    # grouping that naturally skips empty buckets.
+    return np.clip(((t_slice - x0) / bucket_w).astype(np.int64), 0, n_columns - 1)
 
 
-def decimate_for_view(
+def decimate_series_for_view(
     t_sec: np.ndarray,
-    v: np.ndarray,
+    v_arrays: list[np.ndarray],
     x0: float,
     x1: float,
     n_columns: int,
     raw_threshold: int = RAW_POINT_THRESHOLD,
-) -> VisibleData:
+) -> list[VisibleData]:
+    """Decimate one or more value series that all share the same t_sec.
+
+    The visible index range and bucket assignment depend only on t_sec/x0/
+    x1/n_columns -- never on individual series values -- so they're computed
+    once here and reused for every series' min/max reduction, instead of
+    recomputing the same search/bucketing work once per series.
+    """
     i0, i1 = _visible_index_range(t_sec, x0, x1)
-    t_slice = t_sec[i0:i1]
-    v_slice = v[i0:i1]
+    t_raw = t_sec[i0:i1]
 
-    if t_slice.shape[0] <= raw_threshold:
-        return VisibleData(decimated=False, t_raw=t_slice, v_raw=v_slice)
+    if t_raw.shape[0] <= raw_threshold:
+        return [VisibleData(decimated=False, t_raw=t_raw, v_raw=v[i0:i1]) for v in v_arrays]
 
-    bucket_t, bucket_min, bucket_max = _bucket_min_max(t_slice, v_slice, x0, x1, n_columns)
-    return VisibleData(
-        decimated=True,
-        t_raw=t_slice,
-        v_raw=v_slice,
-        bucket_t=bucket_t,
-        bucket_min=bucket_min,
-        bucket_max=bucket_max,
-    )
+    bucket_ids = _bucket_ids_for(t_raw, x0, x1, n_columns)
+    _, first_idx = np.unique(bucket_ids, return_index=True)
+    bucket_t = t_raw[first_idx]
+
+    results = []
+    for v in v_arrays:
+        v_raw = v[i0:i1]
+        results.append(
+            VisibleData(
+                decimated=True,
+                t_raw=t_raw,
+                v_raw=v_raw,
+                bucket_t=bucket_t,
+                bucket_min=np.minimum.reduceat(v_raw, first_idx),
+                bucket_max=np.maximum.reduceat(v_raw, first_idx),
+            )
+        )
+    return results
 
 
 def line_xy(data: VisibleData) -> tuple[np.ndarray, np.ndarray]:
@@ -114,6 +124,12 @@ def bar_spec(data: VisibleData, x0: float, x1: float, n_columns: int) -> BarSpec
     Discrete bars are only legible once each bar spans at least
     BAR_MIN_PIXEL_WIDTH pixels; otherwise degrade to the same min/max
     envelope used for line mode.
+
+    The decision depends only on `data.t_raw`'s spacing, not on values --
+    since every series of a dataset shares the same t_raw (see
+    decimate_series_for_view), all series in one plot always get the same
+    as_bars decision at a given zoom level. That's an invariant, not a bug:
+    bars and the envelope fallback never coexist across series in one plot.
     """
     n_columns = max(int(n_columns), 1)
     span = x1 - x0 if x1 > x0 else 1.0

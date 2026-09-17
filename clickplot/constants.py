@@ -1,5 +1,7 @@
 """Tunable thresholds and defaults shared across click-plot modules."""
 
+import pyqtgraph as pg
+
 # Below this many visible points, plot at full resolution (no decimation).
 RAW_POINT_THRESHOLD = 8_000
 
@@ -15,7 +17,8 @@ DEBOUNCE_MS = 20
 
 NUM_PLOTS = 6
 
-# Distinct, high-saturation colors for the 6 plots' lines/dots/bars.
+# Distinct, high-saturation colors for a plot's overlaid series (assigned in
+# load order, one per series -- NOT one per plot).
 PLOT_COLORS = [
     (220, 30, 30),    # red
     (30, 90, 220),    # blue
@@ -24,3 +27,16 @@ PLOT_COLORS = [
     (150, 40, 190),   # purple
     (0, 170, 170),    # teal
 ]
+
+
+def series_color(index: int, total: int) -> tuple[int, int, int]:
+    """Pick a color for the index'th of `total` series in one plot.
+
+    Uses the fixed high-saturation palette for the common case; falls back
+    to procedurally-generated hues for datasets with more series than the
+    palette has entries, so colors never silently collide.
+    """
+    if index < len(PLOT_COLORS):
+        return PLOT_COLORS[index]
+    c = pg.intColor(index, hues=max(total, len(PLOT_COLORS) + 1))
+    return (c.red(), c.green(), c.blue())

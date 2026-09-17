@@ -62,24 +62,30 @@ class MainWindow(QMainWindow):
         self._resize_debounce.setSingleShot(True)
         self._resize_debounce.timeout.connect(self._redraw_all)
 
-    def _on_dataset_loaded(self, panel: PlotSlotState, dataset: Dataset) -> None:
-        if not self._x_range_initialized:
+    def _on_dataset_loaded(self, panel: PlotSlotState, dataset: Dataset, is_reload: bool = False) -> None:
+        if not is_reload and not self._x_range_initialized:
             master = self.panels[0].plot_widget
             span = dataset.t_sec[-1] - dataset.t_sec[0]
             padding = span * 0.02 if span > 0 else 1.0
             master.setXRange(dataset.t_sec[0] - padding, dataset.t_sec[-1] + padding, padding=0)
             self._x_range_initialized = True
+        verb = "Reloaded" if is_reload else "Loaded"
         self.statusBar().showMessage(
-            f"Loaded '{dataset.name}' into Plot {panel.index + 1} ({dataset.n_points:,} points)"
+            f"{verb} '{dataset.name}' into Plot {panel.index + 1} "
+            f"({dataset.n_points:,} points, {len(dataset.series)} series)"
         )
 
-    def _on_hover(self, panel: PlotSlotState, t_sec: float, value: Optional[float]) -> None:
-        t_us = int(round(t_sec * 1_000_000))
-        dt = np.datetime64(t_us, "us")
-        if value is None:
-            self.statusBar().showMessage(f"Plot {panel.index + 1}: t = {dt}  (no dataset loaded)")
-        else:
-            self.statusBar().showMessage(f"Plot {panel.index + 1}: t = {dt}   value = {value:.6g}")
+    def _on_hover(self, panel: PlotSlotState, t_sec: Optional[float], values: list) -> None:
+        label = f"Plot {panel.index + 1}"
+        if t_sec is None:
+            self.statusBar().showMessage(f"{label}: no dataset loaded")
+            return
+        dt = np.datetime64(int(round(t_sec * 1_000_000)), "us")
+        if not values:
+            self.statusBar().showMessage(f"{label}: t = {dt}  (no visible series)")
+            return
+        parts = "  ".join(f"{name} = {value:.6g}" for name, value in values)
+        self.statusBar().showMessage(f"{label}: t = {dt}   {parts}")
 
     def _reset_time_range(self) -> None:
         loaded = [panel.dataset for panel in self.panels if panel.dataset is not None]

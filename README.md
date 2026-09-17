@@ -1,0 +1,58 @@
+# click-plot
+
+Interactive desktop viewer for up to 6 related time-series datasets (up to 2M
+points each), built with PySide6 + pyqtgraph.
+
+## Setup
+
+A venv already exists at `venv\`. If you need to recreate it:
+
+```
+python -m venv venv
+venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+You don't need to activate the venv (PowerShell's script-execution policy may
+block `Activate.ps1` anyway) -- just call `venv\Scripts\python.exe` directly,
+as in the commands below. If you'd rather activate it, either run
+`venv\Scripts\activate.bat` from `cmd.exe`, or in PowerShell run
+`Set-ExecutionPolicy -Scope Process RemoteSigned` first (applies only to the
+current window).
+
+## Generate example data
+
+Two 1,000,000-point sinusoidal datasets at 1ms spacing, written to `examples/`:
+
+```
+venv\Scripts\python.exe scripts\generate_example_data.py
+```
+
+## Run
+
+```
+venv\Scripts\python.exe -m clickplot
+```
+
+## Usage
+
+- The window has 6 vertically-stacked plots sharing one X (datetime) axis.
+  Scroll to zoom / drag to pan on any plot; all 6 stay aligned. Drag the
+  splitter handles between plots to resize them individually.
+- Right-click inside any plot to load a `.npz` or `.wav` dataset into that
+  plot, or to switch that plot between Dot / Line / Bar rendering.
+- A NumPy dataset file is a `.npz` archive containing two separate arrays,
+  `t` (`datetime64[us]`) and `v` (`float64`), written with
+  `np.savez(path, t=..., v=...)` -- see `scripts/generate_example_data.py`
+  for a reference writer.
+- A `.wav` audio file is also loadable directly: only 8/16/32-bit PCM WAV is
+  supported (float32, 24-bit, and compressed WAV are not). For multi-channel
+  audio, only channel 0 is used. Samples are normalized to the -1.0..1.0
+  range, and since WAV files don't carry an absolute timestamp, the time
+  axis is synthesized from the file's sample rate starting at the Unix
+  epoch (displayed as elapsed time from `00:00:00.000000`).
+
+## Tests
+
+```
+venv\Scripts\python.exe -m pytest tests
+```

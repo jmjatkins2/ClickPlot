@@ -5,6 +5,7 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QMainWindow, QSplitter, QStatusBar
 
 from .constants import DEBOUNCE_MS, NUM_PLOTS
@@ -35,6 +36,7 @@ class MainWindow(QMainWindow):
         forward_action.triggered.connect(lambda: self._step_time(1))
 
         self._x_range_initialized = False
+        self._selection: Optional[tuple[float, float]] = None
 
         self.panels: list[PlotSlotState] = []
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
                 show_x_labels=(i == NUM_PLOTS - 1),
                 on_dataset_loaded=self._on_dataset_loaded,
                 on_hover=self._on_hover,
+                on_selection_drag=self._on_selection_drag,
             )
             self.panels.append(panel)
             splitter.addWidget(panel.plot_widget)
@@ -56,11 +59,20 @@ class MainWindow(QMainWindow):
             panel.plot_widget.setXLink(master)
 
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Right-click a plot to load a dataset.")
+        self.statusBar().showMessage(
+            "Right-click a plot to load a dataset. Left-drag to select a time range, "
+            "right-drag to pan, Z to zoom to the selection."
+        )
 
         self._resize_debounce = QTimer()
         self._resize_debounce.setSingleShot(True)
         self._resize_debounce.timeout.connect(self._redraw_all)
+
+        zoom_shortcut = QShortcut(QKeySequence("Z"), self)
+        zoom_shortcut.activated.connect(self._zoom_to_selection)
+
+        clear_selection_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        clear_selection_shortcut.activated.connect(self._clear_selection)
 
     def _on_dataset_loaded(self, panel: PlotSlotState, dataset: Dataset, is_reload: bool = False) -> None:
         if not is_reload and not self._x_range_initialized:
@@ -82,10 +94,33 @@ class MainWindow(QMainWindow):
             return
         dt = np.datetime64(int(round(t_sec * 1_000_000)), "us")
         if not values:
-            self.statusBar().showMessage(f"{label}: t = {dt}  (no visible series)")
+            self.statusBar().showMessage(f"{label}: t = {dt}  (no data here)")
             return
         parts = "  ".join(f"{name} = {value:.6g}" for name, value in values)
         self.statusBar().showMessage(f"{label}: t = {dt}   {parts}")
+
+    def _on_selection_drag(self, panel: PlotSlotState, x0: float, x1: float, finished: bool) -> None:
+        self._selection = (x0, x1)
+        for p in self.panels:
+            p.set_selection_region(x0, x1)
+        start_dt = np.datetime64(int(round(x0 * 1_000_000)), "us")
+        end_dt = np.datetime64(int(round(x1 * 1_000_000)), "us")
+        self.statusBar().showMessage(f"Selection: {start_dt} to {end_dt}  (duration {x1 - x0:.6f}s)")
+
+    def _zoom_to_selection(self) -> None:
+        if self._selection is None:
+            return
+        x0, x1 = self._selection
+        self.panels[0].plot_widget.setXRange(x0, x1, padding=0)
+        self._clear_selection()
+
+    def _clear_selection(self) -> None:
+        if self._selection is None:
+            return
+        self._selection = None
+        for p in self.panels:
+            p.clear_selection_region()
+        self.statusBar().showMessage("Selection cleared.")
 
     def _reset_time_range(self) -> None:
         loaded = [panel.dataset for panel in self.panels if panel.dataset is not None]

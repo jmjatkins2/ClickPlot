@@ -11,47 +11,56 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox
 
-from .constants import DEBOUNCE_MS, DEFAULT_COLUMN_TARGET, series_color
+from .constants import DEBOUNCE_MS, DEFAULT_COLUMN_TARGET, NORMALIZED_Y_RANGE, series_color
 from .dataset import Dataset, DatasetLoadError
 from .decimation import bar_spec, decimate_series_for_view, dot_xy, line_xy
 from .time_axis import MicrosecondAxisItem
 
 
 class _TimeSelectViewBox(pg.ViewBox):
-    """A ViewBox with wheel-zoom locked to X, and Ctrl+left-drag time selection.
+    """A ViewBox with wheel-zoom locked to X, left-drag time selection, and right-drag pan.
 
     - Scroll-wheel always zooms X only: normal ViewBoxes zoom whichever axis
       the wheel event applies to (both, over the plot area; just Y, over the
       Y-axis label). Forcing axis=0 makes the wheel-scale mask only ever
       include X, regardless of where the cursor is.
-    - Plain left-drag pans X only (vertical panning is disabled entirely via
-      setMouseEnabled(y=False) in PlotSlotState).
-    - Ctrl+left-drag instead draws a selection rectangle; on release the X
-      range zooms to the selected span while Y is left exactly as it was
-      (showAxRect is overridden to drop the rect's Y component).
+    - Left-drag reports the dragged x-range (in data/view coordinates) via
+      on_selection_drag, instead of panning -- PlotSlotState/MainWindow turn
+      that into a persistent selection band shown across all plots.
+    - Right-drag pans X (Y stays disabled via setMouseEnabled(y=False) in
+      PlotSlotState either way), reimplementing the base class's own
+      left/middle-button PanMode translate logic but keyed to the right
+      button instead, since pyqtgraph's default right-drag behavior is a
+      zoom-by-drag we don't want here.
     """
+
+    on_selection_drag = None  # set by PlotSlotState after construction
 
     def wheelEvent(self, ev, axis=None):
         super().wheelEvent(ev, axis=0)
 
-    def showAxRect(self, ax, **kwargs):
-        ax = ax.normalized()
-        y0, y1 = self.viewRange()[1]
-        self.setRange(xRange=(ax.left(), ax.right()), yRange=(y0, y1), padding=0, **kwargs)
-        self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
-
     def mouseDragEvent(self, ev, axis=None):
-        select_time = (
-            axis is None
-            and ev.button() == Qt.MouseButton.LeftButton
-            and bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        )
-        previous_mode = self.state["mouseMode"]
-        self.state["mouseMode"] = pg.ViewBox.RectMode if select_time else pg.ViewBox.PanMode
-        try:
-            super().mouseDragEvent(ev, axis=axis)
-        finally:
-            self.state["mouseMode"] = previous_mode
+        if axis is None and ev.button() == Qt.MouseButton.LeftButton:
+            ev.accept()
+            x0 = self.mapToView(ev.buttonDownPos(ev.button())).x()
+            x1 = self.mapToView(ev.pos()).x()
+            if self.on_selection_drag is not None:
+                self.on_selection_drag(min(x0, x1), max(x0, x1), ev.isFinish())
+            return
+        if axis is None and ev.button() == Qt.MouseButton.RightButton:
+            ev.accept()
+            self._pan_by_drag(ev)
+            return
+        super().mouseDragEvent(ev, axis=axis)
+
+    def _pan_by_drag(self, ev):
+        mask = np.array(self.state["mouseEnabled"], dtype=np.float64)
+        tr = pg.functions.invertQTransform(self.childGroup.transform())
+        dif = (ev.pos() - ev.lastPos()) * -1
+        delta = tr.map(dif * mask) - tr.map(pg.Point(0, 0))
+        self._resetTarget()
+        self.translateBy(x=delta.x(), y=delta.y())
+        self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
 
 
 class RenderMode(Enum):
@@ -61,7 +70,13 @@ class RenderMode(Enum):
 
 
 class SeriesState:
-    """One overlaid value series within a plot: its own style, visibility, and graphics item."""
+    """One overlaid value series within a plot: its own style, visibility, and graphics item.
+
+    Each series normalizes its own finite min/max to -1..1 (see normalize())
+    so it independently fills the plot's full vertical range regardless of
+    other overlaid series' amplitude -- the transform is derived once from
+    the whole series at construction time, not re-fit as the view changes.
+    """
 
     def __init__(self, name: str, v: np.ndarray, color: tuple, render_mode: RenderMode = RenderMode.DOT):
         self.name = name
@@ -70,6 +85,20 @@ class SeriesState:
         self.render_mode = render_mode
         self.visible = True
         self.item = None
+        self.y_offset, self.y_scale = self._compute_normalization(v)
+
+    @staticmethod
+    def _compute_normalization(v: np.ndarray) -> tuple[float, float]:
+        finite = v[np.isfinite(v)]
+        if finite.size == 0:
+            return 0.0, 0.0  # all non-finite -- normalize() is a no-op, values stay NaN
+        vmin, vmax = float(finite.min()), float(finite.max())
+        if vmin == vmax:
+            return vmin, 0.0  # flat series -- renders at 0, the band's center
+        return (vmax + vmin) / 2.0, 2.0 / (vmax - vmin)  # maps [vmin, vmax] -> [-1, 1]
+
+    def normalize(self, y: np.ndarray) -> np.ndarray:
+        return (y - self.y_offset) * self.y_scale
 
 
 class PlotSlotState:
@@ -81,29 +110,37 @@ class PlotSlotState:
         show_x_labels: bool = True,
         on_dataset_loaded: Optional[Callable[["PlotSlotState", Dataset, bool], None]] = None,
         on_hover: Optional[Callable[["PlotSlotState", Optional[float], list], None]] = None,
+        on_selection_drag: Optional[Callable[["PlotSlotState", float, float, bool], None]] = None,
     ):
         self.index = index
         self.on_dataset_loaded = on_dataset_loaded
         self.on_hover = on_hover
+        self.on_selection_drag = on_selection_drag
         self.dataset: Optional[Dataset] = None
         self.series: list[SeriesState] = []
+        self._selecting = False  # True while a left-drag selection gesture is in progress
 
+        view_box = _TimeSelectViewBox()
         self.plot_widget = pg.PlotWidget(
-            viewBox=_TimeSelectViewBox(),
+            viewBox=view_box,
             axisItems={"bottom": MicrosecondAxisItem(orientation="bottom")},
         )
         self.plot_widget.setMinimumHeight(80)
         self.plot_widget.setLabel("left", f"Plot {index + 1}")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self.plot_widget.setYRange(*NORMALIZED_Y_RANGE, padding=0)
         if not show_x_labels:
             self.plot_widget.getAxis("bottom").setStyle(showValues=False)
 
         self.legend = self.plot_widget.addLegend()
 
-        view_box = self.plot_widget.getPlotItem().getViewBox()
+        self.region_item = pg.LinearRegionItem(values=(0, 1), movable=False)
+        self.region_item.setVisible(False)
+        self.plot_widget.addItem(self.region_item)
+
         view_box.setMenuEnabled(False)
         view_box.setMouseEnabled(x=True, y=False)
-        view_box.setMouseMode(pg.ViewBox.PanMode)
+        view_box.on_selection_drag = self._handle_selection_drag
         view_box.sigXRangeChanged.connect(self._on_view_changed)
 
         self.plot_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -116,6 +153,20 @@ class PlotSlotState:
         self._hover_proxy = pg.SignalProxy(
             self.plot_widget.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
         )
+
+    # -- time-range selection --------------------------------------------
+
+    def _handle_selection_drag(self, x0: float, x1: float, finished: bool) -> None:
+        self._selecting = not finished
+        if self.on_selection_drag is not None:
+            self.on_selection_drag(self, x0, x1, finished)
+
+    def set_selection_region(self, x0: float, x1: float) -> None:
+        self.region_item.setRegion((x0, x1))
+        self.region_item.setVisible(True)
+
+    def clear_selection_region(self) -> None:
+        self.region_item.setVisible(False)
 
     # -- data loading ----------------------------------------------------
 
@@ -150,21 +201,13 @@ class PlotSlotState:
             self.series.append(state)
 
         self.plot_widget.setLabel("left", dataset.name)
-        self._fit_y_range()
         self.redraw()
-
-    def _fit_y_range(self) -> None:
-        if not self.series:
-            return
-        vmin = min(float(s.v.min()) for s in self.series)
-        vmax = max(float(s.v.max()) for s in self.series)
-        if vmin == vmax:
-            vmin, vmax = vmin - 1.0, vmax + 1.0
-        self.plot_widget.setYRange(vmin, vmax, padding=0.05)
 
     # -- hover / status reporting --------------------------------------
 
     def _on_mouse_moved(self, evt) -> None:
+        if self._selecting:
+            return  # let the selection's status-bar readout win during a left-drag
         pos = evt[0]
         if self.on_hover is None or not self.plot_widget.sceneBoundingRect().contains(pos):
             return
@@ -182,7 +225,7 @@ class PlotSlotState:
         if idx > 0 and abs(t_sec[idx - 1] - x) < abs(t_sec[idx] - x):
             idx -= 1
         nearest_t = float(t_sec[idx])
-        values = [(s.name, float(s.v[idx])) for s in self.series if s.visible]
+        values = [(s.name, float(s.v[idx])) for s in self.series if s.visible and np.isfinite(s.v[idx])]
         self.on_hover(self, nearest_t, values)
 
     # -- per-series visibility / render mode -----------------------------
@@ -241,6 +284,7 @@ class PlotSlotState:
         """
         if series.render_mode is RenderMode.LINE:
             x, y = line_xy(vd)
+            y = series.normalize(y)
             kind = pg.PlotDataItem
 
             def apply(item):
@@ -251,6 +295,7 @@ class PlotSlotState:
 
         elif series.render_mode is RenderMode.DOT:
             x, y = dot_xy(vd)
+            y = series.normalize(y)
             kind = pg.ScatterPlotItem
 
             def apply(item):
@@ -261,20 +306,28 @@ class PlotSlotState:
 
         else:  # BAR
             spec = bar_spec(vd, x0, x1, n_columns)
+            norm_y = series.normalize(spec.y)
             if spec.as_bars:
+                # Bars grow from the bottom of the normalized band (-1, this
+                # series' own minimum) up to its normalized value, so height
+                # is always >= 0 and reads as "how far up this series' own
+                # range is this sample" -- consistent with line/dot.
+                height = norm_y + 1.0
                 kind = pg.BarGraphItem
 
-                def apply(item, spec=spec):
-                    item.setOpts(x=spec.x, height=spec.y, width=spec.width)
+                def apply(item, x=spec.x, height=height, width=spec.width):
+                    item.setOpts(x=x, y0=-1.0, height=height, width=width)
 
-                def make(spec=spec):
-                    return pg.BarGraphItem(x=spec.x, height=spec.y, width=spec.width, brush=pg.mkBrush(*series.color, 150))
+                def make(x=spec.x, height=height, width=spec.width):
+                    return pg.BarGraphItem(
+                        x=x, y0=-1.0, height=height, width=width, brush=pg.mkBrush(*series.color, 150)
+                    )
 
             else:
                 kind = pg.PlotDataItem
 
-                def apply(item, spec=spec):
-                    item.setData(spec.x, spec.y, connect="all")
+                def apply(item, x=spec.x, y=norm_y):
+                    item.setData(x, y, connect="all")
 
                 def make():
                     return pg.PlotDataItem(pen=pg.mkPen(color=series.color, width=1))

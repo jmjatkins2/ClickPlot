@@ -82,8 +82,11 @@ def decimate_series_for_view(
                 t_raw=t_raw,
                 v_raw=v_raw,
                 bucket_t=bucket_t,
-                bucket_min=np.minimum.reduceat(v_raw, first_idx),
-                bucket_max=np.maximum.reduceat(v_raw, first_idx),
+                # fmin/fmax (unlike minimum/maximum) ignore NaN when the other
+                # operand is finite, so a single NaN sample doesn't null out
+                # its whole bucket -- it's simply excluded from the envelope.
+                bucket_min=np.fmin.reduceat(v_raw, first_idx),
+                bucket_max=np.fmax.reduceat(v_raw, first_idx),
             )
         )
     return results

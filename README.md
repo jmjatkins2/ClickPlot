@@ -35,20 +35,27 @@ venv\Scripts\python.exe -m clickplot
 
 ## Usage
 
-- The window has 6 vertically-stacked plots sharing one X (datetime) axis.
-  Scroll to zoom, or Ctrl+left-drag to select and zoom to a time window, on
-  any plot; all 6 stay aligned. Plain left-drag pans X only (vertical
-  panning is disabled -- each plot's Y range auto-fits its loaded series).
-  Drag the splitter handles between plots to resize them individually.
+- The window has 6 vertically-stacked plots sharing one X (datetime) axis;
+  all 6 stay aligned. Scroll to zoom X. **Left-drag** on any plot draws a
+  persistent time-range selection (shown as a shaded band on all 6 plots);
+  the selected period's start/end/duration is shown live in the status bar.
+  Press **Z** to zoom to the current selection, or **Escape** to clear it
+  without zooming. **Right-drag** pans X. Vertical panning/zooming is
+  disabled entirely -- each series independently normalizes to the plot's
+  full vertical range (see below), so there's nothing to pan on Y. Drag the
+  splitter handles between plots to resize them individually.
 - Right-click inside any plot to load a `.npz` or `.wav` dataset into that
   plot, reload the current file from disk (useful for a file that's still
   being written to), or configure each loaded series.
 - A NumPy dataset file is a `.npz` archive containing one shared `t` array
   (`datetime64[us]`) plus **one or more** named value arrays (`float64`).
   Each value array is a separate **series**, overlaid on the same plot with
-  its own color and a legend entry named after the array. Per-series,
-  right-click gives a "Visible" checkbox (show/hide) and a Dot / Line / Bar
-  style choice (defaults to Dot). Written with e.g.
+  its own color and a legend entry named after the array. Each series
+  independently normalizes its own min/max to the plot's full vertical
+  range, so differently-scaled series overlaid together are equally
+  visible (hover still reports each series' real, unnormalized value).
+  Per-series, right-click gives a "Visible" checkbox (show/hide) and a
+  Dot / Line / Bar style choice (defaults to Dot). Written with e.g.
   `np.savez(path, t=..., channel_a=..., channel_b=...)` -- see
   `scripts/generate_example_data.py` for a reference writer.
 - A `.wav` audio file is also loadable directly, as a single series named

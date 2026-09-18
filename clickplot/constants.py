@@ -17,6 +17,12 @@ DEBOUNCE_MS = 20
 
 NUM_PLOTS = 6
 
+# Fixed Y range every plot uses: each series independently normalizes its
+# own min/max to -1..1, so all overlaid series share this same visual band
+# regardless of their real amplitudes. The 0.05 is padding, matching the
+# ~5% padding the old data-driven Y-fit used.
+NORMALIZED_Y_RANGE = (-1.05, 1.05)
+
 # Distinct, high-saturation colors for a plot's overlaid series (assigned in
 # load order, one per series -- NOT one per plot).
 PLOT_COLORS = [
